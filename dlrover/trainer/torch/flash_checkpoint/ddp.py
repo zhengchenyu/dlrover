@@ -13,6 +13,7 @@
 
 import os
 
+import torch
 import torch.distributed as dist
 
 from dlrover.python.common.constants import CheckpointConstant
@@ -77,6 +78,7 @@ class DdpCheckpointer(Checkpointer):
         deletion_strategy=None,
         save_timeout=CheckpointConstant.SAVE_TIMEOUT,
         replica_count=0,
+        non_blocking=False,
     ):
         self.checkpoint_dir = checkpoint_dir
         if dist.is_initialized():
@@ -84,6 +86,7 @@ class DdpCheckpointer(Checkpointer):
         else:
             self._rank = 0
         self.storage = get_checkpoint_storage(deletion_strategy)
+        self.non_blocking = non_blocking and torch.cuda.is_available()
         self._engine = FullCheckpointEngine(
             checkpoint_dir=checkpoint_dir,
             storage=self.storage,
@@ -92,9 +95,35 @@ class DdpCheckpointer(Checkpointer):
             comm_backend=comm_backend,
             save_timeout=save_timeout,
             replica_count=replica_count,
+            non_blocking=self.non_blocking,
         )
+        if self.non_blocking:
+            self.copy_stream = torch.cuda.Stream()
+            self.copying = False
+            self.copy_waited = True
+
+    def wait_for_copying(self) -> None:
+        if self.non_blocking and self.copying:
+            if not self.copy_stream.query():
+                self.copy_stream.synchronize()
+            self.copying = False
+            self.copy_waited = True
 
     def save_checkpoint(
+        self, step, state_dict, path="", storage_type=StorageType.DISK
+    ):
+        if self.non_blocking:
+            assert (
+                self.copy_waited
+            ), "You should call wait_for_copying to make sure stream is done."
+            with torch.cuda.stream(self.copy_stream):
+                self._save_checkpoint(step, state_dict, path, storage_type)
+                self.copying = True
+                self.copy_waited = False
+        else:
+            self._save_checkpoint(step, state_dict, path, storage_type)
+
+    def _save_checkpoint(
         self, step, state_dict, path="", storage_type=StorageType.DISK
     ):
         if path == "":

@@ -10,7 +10,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+import ctypes
 import importlib
 import json
 import os
@@ -196,30 +196,32 @@ def _create_shared_memory(name, create, size=0):
     return shm
 
 
-def _traverse_copy_to_shm(value, meta, buffer):
+def _traverse_copy_to_shm(value, meta, buffer, non_blocking):
     if isinstance(value, Mapping):
         for k, v in value.items():
             if isinstance(v, (Mapping, List)):
                 m = meta[k]
-                _traverse_copy_to_shm(v, m, buffer)
+                _traverse_copy_to_shm(v, m, buffer, non_blocking)
             elif torch.is_tensor(v):
                 m = meta[k]
-                _write_shared_memory(v, m, buffer)
+                _write_shared_memory(v, m, buffer, non_blocking)
             else:
                 meta[k] = v
     elif isinstance(value, List):
         for i, v in enumerate(value):
             if isinstance(v, (Mapping, List)):
                 m = meta[i]
-                _traverse_copy_to_shm(v, m, buffer)
+                _traverse_copy_to_shm(v, m, buffer, non_blocking)
             elif torch.is_tensor(v):
                 m = meta[i]
-                _write_shared_memory(v, m, buffer)
+                _write_shared_memory(v, m, buffer, non_blocking)
             else:
                 meta[i] = v
 
 
-def _write_shared_memory(value: torch.Tensor, meta: TensorMeta, buffer):
+def _write_shared_memory(
+    value: torch.Tensor, meta: TensorMeta, buffer, non_blocking=False
+):
     """
     Write a CPU tensor into the shared memory.
     """
@@ -229,7 +231,7 @@ def _write_shared_memory(value: torch.Tensor, meta: TensorMeta, buffer):
         shm_tensor = torch.frombuffer(
             buffer, dtype=value.dtype, count=value.numel(), offset=meta.offset
         ).reshape(value.shape)
-        shm_tensor.copy_(value)
+        shm_tensor.copy_(value, non_blocking=non_blocking)
 
 
 class SharedMemoryHandler(object):
@@ -243,7 +245,7 @@ class SharedMemoryHandler(object):
             the handler is on the device.
     """
 
-    def __init__(self, local_rank, host=True):
+    def __init__(self, local_rank, host=True, non_blocking=False):
         self._buffer_size = 0
         meta_name = CheckpointSharedObjPrefix.META_NAME + str(local_rank)
         job_name = os.getenv(NodeEnv.TORCHELASTIC_RUN_ID, "")
@@ -262,6 +264,7 @@ class SharedMemoryHandler(object):
         self.metadata = SharedDict(name=meta_name, create=host)
         self._need_creation = True
         self._master_client = None
+        self.non_blocking = non_blocking
 
     def get_master_client(self):
         if self._master_client is None:
@@ -270,6 +273,14 @@ class SharedMemoryHandler(object):
 
     def close(self):
         if self.shared_memory:
+            if self.non_blocking:
+                data_ptr = ctypes.addressof(
+                    ctypes.c_char.from_buffer(self.shared_memory.buf)
+                )
+                succ = int(torch.cuda.cudart().cudaHostUnregister(data_ptr))
+                assert (
+                    succ == 0
+                ), f"Unpinning shared memory failed with error-code: {succ}"
             self.shared_memory.close()
 
     def unlink(self):
@@ -323,7 +334,9 @@ class SharedMemoryHandler(object):
         )
         self.metadata.set(meta_dict)
         assert self.shared_memory is not None
-        _traverse_copy_to_shm(state_dict, meta_dict, self.shared_memory.buf)
+        _traverse_copy_to_shm(
+            state_dict, meta_dict, self.shared_memory.buf, self.non_blocking
+        )
         ckpt_conf.writing_shm = False
         self.metadata.set(meta_dict)
         report_local_event(
@@ -382,6 +395,21 @@ class SharedMemoryHandler(object):
         self.shared_memory = _create_shared_memory(
             self._shm_name, create=create, size=size
         )
+        if self.non_blocking:
+            logger.info("register shared memory to pinned.")
+            data_ptr = ctypes.addressof(
+                ctypes.c_char.from_buffer(self.shared_memory.buf)
+            )
+            succ = int(
+                torch.cuda.cudart().cudaHostRegister(
+                    data_ptr,
+                    self.shared_memory.size,
+                    0,
+                )
+            )
+            assert (
+                succ == 0
+            ), f"Pinning shared memory failed with error-code: {succ}"
         self._need_creation = False
 
     def get_checkpoint_config(self, default_config):
