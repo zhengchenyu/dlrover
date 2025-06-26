@@ -206,9 +206,11 @@ class ElasticTrainer(object):
         self,
         model,
         dataloader: ElasticDataLoader = None,
+        fix_total_batch_size=False,
     ):
         self.model = model
         self.dataloader = dataloader
+        self.fix_total_batch_size = fix_total_batch_size
         self.gradient_state = GradientState()
         self.gradient_accumulation_steps = 1
         self._report_step_interval = 15  # 15s
@@ -229,7 +231,8 @@ class ElasticTrainer(object):
         """
         Prepare optimizer and learning rate scheduler in elastic training.
         """
-        self._set_gradient_accumulation_steps()
+        if self.fix_total_batch_size:
+            self._set_gradient_accumulation_steps()
         optimizer = _ElasticOptimizer(optimizer)
         if lr_scheduler:
             lr_scheduler = _ElasticLRScheduler(lr_scheduler)
@@ -238,7 +241,7 @@ class ElasticTrainer(object):
             return optimizer
 
     @contextmanager
-    def step(self, fix_total_batch_size=False):
+    def step(self):
         """
         A context manager that will lightly wrap around and to keep
         the global batch size fixed when the number of worker changes.
@@ -267,7 +270,7 @@ class ElasticTrainer(object):
         ...         optimizer.zero_grad()
         ```
         """
-        self._before_step(fix_total_batch_size)
+        self._before_step()
         context = contextlib.nullcontext
         if not self.gradient_state.sync_gradients:
             context = getattr(self.model, "no_sync", context)
@@ -283,11 +286,11 @@ class ElasticTrainer(object):
     def num_steps(self):
         return self.gradient_state.num_steps
 
-    def _before_step(self, fix_total_batch_size):
+    def _before_step(self):
         """Sets the right `sync_gradients` and either resets
         or increases `self.step`"""
         self.gradient_state.num_backward_steps += 1
-        if not fix_total_batch_size:
+        if not self.fix_total_batch_size:
             self.gradient_state.sync_gradients = True
         else:
             self.gradient_state.check_sync_gradient(

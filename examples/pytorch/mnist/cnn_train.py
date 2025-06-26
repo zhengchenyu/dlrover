@@ -210,7 +210,7 @@ def train_epoch(
 
         # Automatically adjust the accumulated step to keep the global batch
         # size fixed even if the number of workers changes.
-        with elastic_trainer.step(fixed_batch_size):
+        with elastic_trainer.step():
             optimizer.zero_grad()
             target = target.type(torch.LongTensor)
             data, target = data.to(device), target.to(device)
@@ -222,7 +222,12 @@ def train_epoch(
             if train_step % 20 == 0:
                 log_rank0("loss = {}, step = {}".format(loss, train_step))
 
-            if train_step > 0 and train_step % 50 == 0:
+            if (
+                train_step > 0
+                and train_step
+                % (50 * elastic_trainer.gradient_accumulation_steps)
+                == 0
+            ):
                 sd = {
                     "step": train_step,
                     "model": model.state_dict(),
