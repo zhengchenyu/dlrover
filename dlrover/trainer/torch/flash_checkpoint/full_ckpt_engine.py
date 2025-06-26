@@ -58,6 +58,7 @@ class FullCheckpointEngine(CheckpointEngine):
         comm_backend="",
         save_timeout=CheckpointConstant.SAVE_TIMEOUT,
         replica_count=0,
+        non_blocking=False,
     ):
         if global_shard_num < local_shard_num:
             global_shard_num = local_shard_num
@@ -70,6 +71,7 @@ class FullCheckpointEngine(CheckpointEngine):
             comm_backend,
             save_timeout,
             replica_count=replica_count,
+            non_blocking=non_blocking,
         )
 
     def get_saving_ranks(self):

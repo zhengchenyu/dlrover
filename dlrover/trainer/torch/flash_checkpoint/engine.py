@@ -181,6 +181,7 @@ class CheckpointEngine(metaclass=ABCMeta):
         comm_backend: str = "",
         save_timeout: int = CheckpointConstant.SAVE_TIMEOUT,
         replica_count=0,
+        non_blocking=False,
     ):
         logger.info(
             "Initializing checkpoint engine: "
@@ -229,7 +230,7 @@ class CheckpointEngine(metaclass=ABCMeta):
         wait_socket_server(self._shm_lock)
 
         self._shm_handler = SharedMemoryHandler(
-            self.local_shard_id, host=False
+            self.local_shard_id, host=False, non_blocking=non_blocking
         )
         self._rank = 0
         self._group_rank = 0
